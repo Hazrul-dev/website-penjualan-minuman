@@ -1,79 +1,55 @@
 <?php
 session_start();
-include 'includes/db.php';
+include '../includes/db.php';
+include '../includes/functions.php';
 
-// Jika ada user_id di URL, update session agar tetap di akun yang benar
-if (isset($_GET['user_id'])) {
-    $_SESSION['user_id'] = $_GET['user_id'];
-}
-
-// Cek jika ada notifikasi pembayaran
-$has_notification = isset($_SESSION['has_notification']) ? $_SESSION['has_notification'] : false;
-$notification_message = isset($_SESSION['notification_message']) ? $_SESSION['notification_message'] : '';
-
-// Hapus notifikasi dari session setelah dimuat
-unset($_SESSION['has_notification']);
-unset($_SESSION['notification_message']);
-
-include 'includes/header.php';
-
-// Cek apakah pengguna sudah login
-if (!isset($_SESSION['user_id'])) {
-    die("Selamat Datang di Aplikasi Penjualan Minuman Float Smoothies Medan");
+if (!isAdmin()) {
     header('Location: login.php');
     exit();
 }
 
-// Ambil status pesanan terbaru
-$user_id = $_SESSION['user_id'];
-$sql = "SELECT status FROM payments WHERE user_id = ? AND status = 'approved' ORDER BY payment_date DESC LIMIT 1";
-$stmt = $conn->prepare($sql);
-$stmt->bind_param("i", $user_id);
-$stmt->execute();
-$result = $stmt->get_result();
-$latest_payment = $result->fetch_assoc();
-$stmt->close();
+// Ambil data pengaturan toko
+$sql_shop_settings = "SELECT * FROM shop_settings LIMIT 1";
+$result_shop_settings = $conn->query($sql_shop_settings);
+$shop_settings = $result_shop_settings->fetch_assoc();
 
-// Ambil data profil pengguna
-$user_id = $_SESSION['user_id'];
-$sql = "SELECT user_profiles.profile_picture, users.username 
-        FROM user_profiles 
-        JOIN users ON user_profiles.user_id = users.id 
-        WHERE user_profiles.user_id = ?";
-$stmt = $conn->prepare($sql);
-$stmt->bind_param("i", $user_id);
-$stmt->execute();
-$result = $stmt->get_result();
-$profile = $result->fetch_assoc();
-$stmt->close();
+// Ambil data statistik
+$sql_total_orders = "SELECT COUNT(*) as total_orders FROM orders";
+$result_total_orders = $conn->query($sql_total_orders);
+$total_orders = $result_total_orders->fetch_assoc()['total_orders'];
 
-// Ambil riwayat pembelian
-$sql = "SELECT orders.id, orders.order_date, orders.total_price, 
-               payments.delivery_fee, 
-               (orders.total_price + payments.delivery_fee) AS total_payment, 
-               payments.method, payments.bank, payments.status
-        FROM orders 
-        JOIN payments ON orders.id = payments.order_id 
-        WHERE orders.user_id = ? 
-        ORDER BY orders.order_date DESC";
-$stmt = $conn->prepare($sql);
-$stmt->bind_param("i", $_SESSION['user_id']);
-$stmt->execute();
-$result = $stmt->get_result();
+$sql_total_revenue = "SELECT SUM(orders.total_price + payments.delivery_fee) as total_revenue 
+                      FROM orders 
+                      JOIN payments ON orders.id = payments.order_id";
+$result_total_revenue = $conn->query($sql_total_revenue);
+$total_revenue = $result_total_revenue->fetch_assoc()['total_revenue'];
 
-if (!$stmt) {
-    die("Query Error: " . $conn->error); // Menampilkan error jika query salah
+$sql_pending_payments = "SELECT COUNT(*) as pending_payments FROM payments WHERE status = 'pending'";
+$result_pending_payments = $conn->query($sql_pending_payments);
+$pending_payments = $result_pending_payments->fetch_assoc()['pending_payments'];
+
+if (isset($_POST['order_id']) && isset($_POST['status'])) {
+    $order_id = $_POST['order_id'];
+    $status = $_POST['status']; // 'approved' atau 'rejected'
+
+    $sql = "UPDATE orders SET status = ? WHERE id = ?";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("si", $status, $order_id);
+    $stmt->execute();
+    $stmt->close();
+
+    // Set notifikasi di sesi agar bisa digunakan di halaman index.php
+    $_SESSION['has_notification'] = true;
+    if ($status == 'approved') {
+        $_SESSION['notification_message'] = "Pembelian sudah dikonfirmasi. Minuman sedang dalam pengantaran.";
+    } else {
+        $_SESSION['notification_message'] = "Proses minuman gagal untuk pengiriman.";
+    }
+
+    header("Location: index.php");
+    exit();
 }
 
-$stmt->bind_param("i", $user_id);
-$stmt->execute();
-$result = $stmt->get_result();
-
-// Pengaturan waktu pemesanan
-$open_time = "08:00";
-$close_time = "22:00";
-$current_time = date("H:i");  // Get current time in 24-hour format
-$is_open = (strtotime($current_time) >= strtotime($open_time) && strtotime($current_time) <= strtotime($close_time));
 ?>
 
 <!DOCTYPE html>
@@ -81,448 +57,424 @@ $is_open = (strtotime($current_time) >= strtotime($open_time) && strtotime($curr
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FLOAT SMOOTHIES MEDAN</title>
+    <title>Admin Dashboard - FLOAT SMOOTHIES MEDAN</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css">
     <link rel="icon" type="image/jpeg" href="assets/float.jpg">
-    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/print-js@1.6.0/dist/print.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/print-js@1.6.0/dist/print.min.css">
     <style>
-        /* Gaya Umum */
-        body {
-            background: linear-gradient(rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.6)), url('images/kede.jpg');
-            background-size: cover;
-            background-position: center;
-            background-attachment: fixed;
-            color: #fff;
-            font-family: 'Poppins', sans-serif;
-            margin: 0;
-            padding: 0;
-            min-height: 100vh;
-        }
-
-        .hero {
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 2rem;
-            text-align: center; /* Agar teks di dalamnya tetap rata tengah */
-        }
-
-        .hero-content {
-            background: rgba(255, 105, 180, 0.85);
-            backdrop-filter: blur(10px);
-            padding: 3rem;
-            border-radius: 20px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-            margin: auto;
-            text-align: center;
-            max-width: 500px;
-            width: 100%;
-            animation: fadeIn 1s ease-out;
-        }
-
-
-        .profile-picture {
-            margin-bottom: 1.5rem;
-        }
-
-        .profile-picture img {
-            width: 120px;
-            height: 120px;
-            border-radius: 50%;
-            border: 4px solid #fff;
-            box-shadow: 0 0 20px rgba(255, 105, 180, 0.5);
-            object-fit: cover;
-        }
-
-        .hero-content h1 {
-            font-size: 2.5rem;
-            margin-bottom: 0.5rem;
-            color: #fff;
-            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
-        }
-
-        .hero-content p {
-            font-size: 1.2rem;
-            margin-bottom: 1.5rem;
-        }
-
-        .status-container {
-            margin: 1.5rem 0;
-            padding: 1rem;
-            border-radius: 10px;
-            font-weight: bold;
-            font-size: 1.1rem;
-            transition: all 0.3s ease;
-        }
-
-        .status-open {
-            background: linear-gradient(135deg, #4caf50, #45a049);
-            border: none;
-            padding: 8px 16px;
-            border-radius: 20px;
-            color: white;
-            font-weight: 500;
-            position: relative;
-            overflow: hidden;
-            box-shadow: 0 4px 15px rgba(76, 175, 80, 0.3);
-            transition: all 0.3s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .status-closed {
-            background: linear-gradient(135deg, #f44336, #f4f4f4);
-            border: none;
-            padding: 8px 16px;
-            border-radius: 20px;
-            color: white;
-            font-weight: 500;
-            position: relative;
-            overflow: hidden;
-            box-shadow: 0 4px 15px rgba(76, 175, 80, 0.3);
-            transition: all 0.3s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        /* Opening Hours */
-        .opening-hours {
-            background: rgba(0, 0, 0, 0.2);
-            padding: 1rem;
-            border-radius: 10px;
-            margin: 1.5rem 0;
-        }
-
-        .opening-hours p {
-            margin: 0;
-            font-size: 1rem;
-        }
-
-        .opening-hours strong {
-            color: #fff;
-            font-weight: 600;
-        }
-
-        .btn {
-            display: inline-block;
-            padding: 1rem 2rem;
-            background: linear-gradient(45deg, #ff69b4, #ff1493);
-            color: #fff;
-            text-decoration: none;
-            border-radius: 25px;
-            font-size: 1.1rem;
-            font-weight: 600;
-            transition: all 0.3s ease;
-            border: none;
-            cursor: pointer;
-            box-shadow: 0 4px 15px rgba(255, 105, 180, 0.4);
-        }
-
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(255, 105, 180, 0.6);
-            background: linear-gradient(45deg, #ff1493, #ff69b4);
-        }
-
-        .about-container {
-            background: rgba(255, 255, 255, 0.95);
-            margin: 3rem auto;
-            padding: 2rem;
-            border-radius: 20px;
-            max-width: 800px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-            color: #333;
-        }
-
-        .about-container h2 {
-            color: #ff1493;
-            margin-bottom: 1.5rem;
-            font-size: 1.8rem;
-        }
-
-        .about-container p {
-            line-height: 1.8;
-            margin-bottom: 1rem;
-        }
-
-        .notification-modal {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            background: rgba(255, 105, 180, 0.9); /* Warna pink cerah */
-            padding: 20px;
-            border-radius: 10px;
-            z-index: 1000;
-        }
-
-        .purchase-history {
-            margin: 40px auto;
-            max-width: 800px;
-            background: rgba(255, 255, 255, 0.9); /* Latar belakang putih dengan transparansi */
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-        }
-
-        .modern-table {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
-            margin: 1.5rem 0;
-        }
-
-        .modern-table th,
-        .modern-table td {
-            padding: 1rem;
-            text-align: left;
-            border: none;
-        }
-
-        .modern-table th {
-            background: #ff69b4;
-            color: #fff;
-            font-weight: 600;
-        }
-
-        .modern-table th:first-child {
-            border-top-left-radius: 10px;
-        }
-
-        .modern-table th:last-child {
-            border-top-right-radius: 10px;
-        }
-
-        .modern-table tr:nth-child(even) td {
-            background: rgba(255, 105, 180, 0.1);
-        }
-
-        .modern-table tr:nth-child(odd) td {
-            background: #fff;
-        }
-
-        .modern-table td {
-            color: #333;
-            border-bottom: 1px solid rgba(255, 105, 180, 0.2);
-        }
-
-        .bell-icon {
-            font-size: 24px;
-            position: relative;
-        }
-
-        .bell-icon .notification-dot {
-            position: absolute;
-            top: 0;
-            right: 0;
-            background: red;
-            color: white;
-            border-radius: 50%;
-            width: 10px;
-            height: 10px;
-        }
-
-        .about-container {
-            background: rgba(255, 255, 255, 0.9); /* Latar belakang putih dengan transparansi */
-            padding: 20px;
-            border-radius: 10px;
-            margin: 40px auto;
-            max-width: 800px;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-            color: #333;
-        }
-
-        .animate__animated {
-            animation-duration: 1s;
-        }
-
-        /* Status Buka/Tutup */
-        .status-container {
-            margin-top: 20px;
-            padding: 10px;
-            border-radius: 5px;
-            text-align: center;
-            font-weight: bold;
-            font-size: 1.2em; /* Ukuran font lebih besar */
-        }
-
-        /* Efek Blur untuk Background */
-        .hero::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: url('images/hero-bg.jpg') no-repeat center center/cover;
-            filter: blur(5px); /* Efek blur */
-            z-index: -1;
-        }
-        .opening-hours {
-            margin-top: 15px;
-            font-size: 0.9em;
-            color: #fff;
-            background: rgba(0, 0, 0, 0.3); /* Latar belakang semi-transparan */
-            padding: 10px;
-            border-radius: 5px;
-            text-align: center;
-        }
-
-        .opening-hours strong {
-            color: #ff69b4; /* Warna pink cerah untuk highlight jam */
-        }
-
-        /* Responsive Design */
-    @media (max-width: 768px) {
-        .hero-content {
-            padding: 2rem;
-            margin: 1rem;
-        }
-
-        .modern-table {
-            display: block;
-            overflow-x: auto;
-            white-space: nowrap;
-        }
-
-        .about-container {
-            margin: 2rem 1rem;
-            padding: 1.5rem;
-        }
-
-        .hero-content h1 {
-            font-size: 2rem;
-        }
+        /* Gaya Umum untuk Semua Halaman Admin */
+    body {
+        background-color: #1a1a2e;
+        color: #eaeaea;
+        font-family: 'Poppins', sans-serif;
+        margin: 0;
+        padding: 0;
     }
 
-    /* Animations */
-    @keyframes fadeIn {
-        from {
-            opacity: 0;
-            transform: translateY(20px);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0);
-        }
+    header {
+            background-color: #002855; /* Warna biru gelap */
+            color: white;
+            padding: 15px 20px;
+            text-align: center;
+            font-size: 24px;
+            font-weight: bold;
+    }
+
+    header .container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+    }
+
+    header h1 {
+        font-size: 1.8rem;
+        margin-bottom: 15px;
+        color: #black;
+    }
+
+    /* Navigasi Admin */
+    .admin-navigation {
+        display: flex;
+        gap: 15px;
+        justify-content: center;
+    }
+
+    .admin-navigation .nav-link {
+        text-decoration: none;
+        color: #007bff;
+        font-size: 1rem;
+        padding: 10px 20px;
+        border: 2px solid transparent;
+        border-radius: 8px;
+        transition: all 0.3s ease;
+    }
+
+    .admin-navigation .nav-link:hover {
+        background-color: #007bff;
+        color: #fff;
+        border-color: #007bff;
+    }
+
+    .admin-navigation .nav-link.active {
+        background-color: #0056b3;
+        color: #fff;
+        border-color: #0056b3;
+    }
+
+    /* Container Admin */
+    .admin-container {
+        max-width: 1100px;
+        margin: 30px auto;
+        padding: 20px;
+        background-color: #16213e;
+        border-radius: 10px;
+        box-shadow: 0px 8px 20px rgba(0, 0, 0, 0.5);
+    }
+
+    .admin-container h2 {
+        font-size: 24px;
+        color: #00d9ff;
+        margin-bottom: 20px;
+    }
+
+    /* Form Group */
+    .form-group {
+        margin-bottom: 15px;
+    }
+
+    .form-group label {
+        display: block;
+        font-size: 14px;
+        margin-bottom: 5px;
+        color: #eaeaea;
+    }
+
+    .form-group input,
+    .form-group textarea {
+        width: 100%;
+        padding: 10px;
+        border-radius: 5px;
+        border: 1px solid #2c3e50;
+        background-color: #1a1a2e;
+        color: #eaeaea;
+        font-family: 'Poppins', sans-serif;
+    }
+
+    .form-group input:focus,
+    .form-group textarea:focus {
+        border-color: #00d9ff;
+        outline: none;
+    }
+
+    /* Tombol */
+    .btn {
+        display: inline-block;
+        padding: 10px 20px;
+        background-color: #00d9ff;
+        color: #fff;
+        font-size: 14px;
+        font-weight: bold;
+        text-decoration: none;
+        border-radius: 5px;
+        text-align: center;
+        transition: all 0.3s ease;
+        border: none;
+        cursor: pointer;
+    }
+
+    .btn:hover {
+        background-color: #00b2cc;
+    }
+
+    /* Tabel Modern */
+    .modern-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 20px;
+    }
+
+    .modern-table th,
+    .modern-table td {
+        text-align: left;
+        padding: 12px;
+        border: 1px solid #2c3e50;
+    }
+
+    .modern-table th {
+        background-color: #0f3460;
+        color: #fff;
+    }
+
+    .modern-table td {
+        background-color: #1a1a2e;
+    }
+
+    .modern-table tr:hover td {
+        background-color: #0f3460;
+        color: #fff;
+    }
+
+    .modern-table img {
+        border-radius: 5px;
+        max-width: 100px;
+        height: auto;
+    }
+
+    /* Stat Card */
+    .stats-container {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 20px;
+        margin-bottom: 30px;
+    }
+
+    .stat-card {
+        background-color: #0f3460;
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.3);
+        transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .stat-card:hover {
+        transform: translateY(-10px);
+        box-shadow: 0px 8px 20px rgba(0, 0, 0, 0.5);
+    }
+
+    .stat-card h3 {
+        font-size: 18px;
+        color: #00d9ff;
+        margin-bottom: 10px;
+    }
+
+    .stat-card p {
+        font-size: 22px;
+        font-weight: bold;
+        color: #eaeaea;
+    }
+
+    .shop-image {
+    text-align: center;
+    margin: 20px 0;
+    }
+
+    .shop-image img {
+        max-width: 300px; /* Sesuaikan ukuran maksimal gambar */
+        height: auto;
+        border-radius: 10px;
+        box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.3);
+        transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+
+    .shop-image img:hover {
+        transform: scale(1.05); /* Efek zoom saat hover */
+        box-shadow: 0px 8px 20px rgba(0, 0, 0, 0.5);
+    }
+
+    .footer {
+            background-color: #333;
+            color: white;
+            text-align: center;
+            padding: 10px;
+    }
+
+    /* Animasi */
+    .animate__animated {
+        animation-duration: 0.5s;
     }
     </style>
 </head>
 <body>
+<header>
+    <div class="container">
+        <h1>Admin Dashboard</h1>
+        <nav class="admin-navigation">
+            <a href="index.php" class="nav-link active">Dashboard</a>
+            <a href="manage_products.php" class="nav-link">Manage Products</a>
+            <a href="manage_shop_settings.php" class="nav-link">Manage Shop Settings</a>
+            <a href="../logout.php" class="nav-link">Logout</a>
+        </nav>
+    </div>
+</header>
 
-<div class="hero-content animate__animated animate__fadeIn">
-    <?php if ($profile && $profile['profile_picture']): ?>
-        <div class="profile-picture">
-            <img src="uploads/profiles/<?php echo $profile['profile_picture']; ?>" alt="Profile Picture">
+<div class="admin-container animate__animated animate__fadeIn">
+    <h2>Dashboard Overview</h2>
+    <div class="stats-container">
+        <div class="stat-card">
+            <h3>Total Orders</h3>
+            <p><?php echo $total_orders; ?></p>
+        </div>
+        <div class="stat-card">
+            <h3>Total Revenue</h3>
+            <p>Rp <?php echo number_format($total_revenue); ?></p>
+        </div>
+        <div class="stat-card">
+            <h3>Pending Payments</h3>
+            <p><?php echo $pending_payments; ?></p>
+        </div>
+    </div>
+
+    <div class="admin-container animate__animated animate__fadeIn">
+    <h2>Shop Information</h2>
+    <div class="stats-container">
+        <div class="stat-card">
+            <h3>Shop Name</h3>
+            <p><?php echo $shop_settings['shop_name'] ?? 'N/A'; ?></p>
+        </div>
+        <div class="stat-card">
+            <h3>Shop Address</h3>
+            <p><?php echo $shop_settings['shop_address'] ?? 'N/A'; ?></p>
+        </div>
+        <div class="stat-card">
+            <h3>Opening Hours</h3>
+            <p><?php echo $shop_settings['opening_hours'] ?? 'N/A'; ?></p>
+        </div>
+    </div>
+
+    <div class="stats-container">
+        <div class="stat-card">
+            <h3>Bank BRI</h3>
+            <p><?php echo $shop_settings['bank_bri'] ?? 'N/A'; ?></p>
+        </div>
+        <div class="stat-card">
+            <h3>Bank Mandiri</h3>
+            <p><?php echo $shop_settings['bank_mandiri'] ?? 'N/A'; ?></p>
+        </div>
+        <div class="stat-card">
+            <h3>DANA</h3>
+            <p><?php echo $shop_settings['dana'] ?? 'N/A'; ?></p>
+        </div>
+    </div>
+
+    <div class="stats-container">
+        <div class="stat-card">
+            <h3>ShopeePay</h3>
+            <p><?php echo $shop_settings['shopeepay'] ?? 'N/A'; ?></p>
+        </div>
+        <div class="stat-card">
+            <h3>GoPay</h3>
+            <p><?php echo $shop_settings['gopay'] ?? 'N/A'; ?></p>
+        </div>
+        <div class="stat-card">
+            <h3>OVO</h3>
+            <p><?php echo $shop_settings['ovo'] ?? 'N/A'; ?></p>
+        </div>
+    </div>
+
+    <?php if ($shop_settings && $shop_settings['shop_image']): ?>
+        <div class="shop-image">
+            <img src="../uploads/<?php echo $shop_settings['shop_image']; ?>" alt="Shop Image">
         </div>
     <?php endif; ?>
-    <h1>Welcome, <?php echo $profile['username'] ?? 'Guest'; ?>!</h1>
-    <p>Order your favorite drinks now!</p>
-    <div id="shop-status" class="status-container"></div>
-    <div class="opening-hours">
-        <p>Toko buka pada pukul <strong>08.00 WIB</strong> sampai dengan <strong>22.00 WIB</strong>.</p>
-    </div>
-    <a href="menu.php" class="btn animate__animated animate__pulse animate__infinite">View Menu</a>
 </div>
 
-    <div class="about-container animate__animated animate__fadeInUp">
-        <h2>About Our Drink Sales</h2>
-        <p>Situs web kami menawarkan berbagai macam minuman segar, mulai dari minuman klasik hingga kreasi unik. Kami mendapatkan bahan-bahan dari pemasok terbaik untuk memastikan kualitas terbaik bagi pelanggan kami. Dengan 8 pilihan minuman, kami melayani semua selera dan preferensi. Baik Anda ingin smoothie manis atau jus sehat, kami menyediakannya untuk Anda. Misi kami adalah menyediakan pengalaman pemesanan online yang lancar, lengkap dengan pengiriman cepat dan layanan pelanggan yang sangat baik. Bergabunglah dengan kami dalam menjelajahi dunia minuman lezat!</p>
+    <div class="chart-container">
+        <canvas id="ordersChart"></canvas>
     </div>
 
-    <div class="about-container animate__animated animate__fadeInUp">
-        <h2>Riwayat Pembelian</h2>
-        <table class="modern-table">
-            <thead>
-                <tr>
-                    <th>Order ID</th>
-                    <th>Total Price</th>
-                    <th>Order Date</th>
-                    <th>Payment Method</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-            <?php while ($order = $result->fetch_assoc()): ?>
+    <h2>Pending Payments</h2>
+    <table class="modern-table">
+        <thead>
             <tr>
-                <td><?php echo $order['id']; ?></td>
-                <td>Rp <?php echo number_format($order['total_payment']); ?></td>
-                <td><?php echo date('d F Y H:i:s', strtotime($order['order_date'])); ?></td>
-                <td><?php echo $order['method']; ?></td> <!-- Tampilkan metode pembayaran -->
-                <td><?php echo $order['status']; ?></td>
-                <td>
-                    <a href="print_receipt.php?order_id=<?php echo $order['id']; ?>" class="btn">Cetak Bon</a>
-                </td>
+                <th>Payment ID</th>
+                <th>Customer</th>
+                <th>Method</th>
+                <th>Amount</th>
+                <th>Delivery Location</th>
+                <th>Payment Date</th>
+                <th>Actions</th>
             </tr>
-        <?php endwhile; ?>
-            </tbody>
-        </table>
-    </div>
+        </thead>
+        <tbody>
+            <?php
+            $sql_payments = "SELECT payments.id, users.username, payments.method, 
+                                    (payments.amount) AS total_payment, 
+                                    payments.delivery_location, payments.payment_date 
+                            FROM payments 
+                            JOIN users ON payments.user_id = users.id 
+                            WHERE payments.status = 'pending'";
+            $result_payments = $conn->query($sql_payments);
+            while($row = $result_payments->fetch_assoc()): ?>
+                <tr>
+                    <td><?php echo $row['id']; ?></td>
+                    <td><?php echo $row['username']; ?></td>
+                    <td><?php echo $row['method']; ?></td>
+                    <td>Rp <?php echo number_format($row['total_payment']); ?></td>
+                    <td><?php echo $row['delivery_location']; ?></td>
+                    <td><?php echo $row['payment_date']; ?></td>
+                    <td>
+                        <a href="approve_payment.php?id=<?php echo $row['id']; ?>" class="btn">Approve</a>
+                        <a href="reject_payment.php?id=<?php echo $row['id']; ?>" class="btn">Reject</a>
+                    </td>
+                </tr>
+            <?php endwhile; ?>
+        </tbody>
+    </table>
+</div>
 
-    <script>
-    function toggleNotification() {
-        let panel = document.getElementById("notification-panel");
-        panel.style.display = (panel.style.display === "block") ? "none" : "block";
-
-        if (panel.style.display === "block") {
-            setTimeout(() => {
-                panel.style.display = 'none';
-            }, 5000);
-        }
-    }
-
-    function checkNotifications() {
-        fetch("check_notifications.php")
-            .then(response => response.json())
-            .then(data => {
-                let bell = document.querySelector(".notification-bell");
-                let dot = document.querySelector(".notification-dot");
-
-                if (data.has_notification) {
-                    if (!dot) {
-                        let newDot = document.createElement("span");
-                        newDot.classList.add("notification-dot");
-                        bell.appendChild(newDot);
+<script>
+    const ctx = document.getElementById('ordersChart').getContext('2d');
+    const ordersChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: ['January', 'February', 'March', 'April', 'May', 'June', 'July'],
+            datasets: [{
+                label: 'Total Orders',
+                data: [12, 19, 3, 5, 2, 3, 10],
+                backgroundColor: 'rgba(0, 255, 136, 0.2)',
+                borderColor: 'rgba(0, 255, 136, 1)',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    grid: {
+                        color: '#2c3e50'
                     }
-                } else {
-                    if (dot) dot.remove();
+                },
+                x: {
+                    grid: {
+                        color: '#2c3e50'
+                    }
                 }
-            });
+            },
+            plugins: {
+                legend: {
+                    labels: {
+                        color: '#eaeaea'
+                    }
+                }
+            }
+        }
+    });
+    // Fungsi untuk mencetak bon pembayaran
+    function printReceipt(paymentId) {
+        fetch(`fetch_receipt.php?id=${paymentId}`)
+            .then(response => response.text())
+            .then(data => {
+                printJS({
+                    printable: data,
+                    type: 'raw-html',
+                    style: 'body { font-family: Arial, sans-serif; padding: 20px; } h2 { color: #333; }'
+                });
+            })
+            .catch(error => console.error('Error:', error));
     }
-
-    setInterval(checkNotifications, 5000);
-
-    function updateShopStatus() {
-    const now = new Date();
-    const currentHour = now.getHours();
-    const currentMinute = now.getMinutes();
-    const currentTime = currentHour * 60 + currentMinute; // Convert to minutes
-
-    const openHour = 8;
-    const closeHour = 22;
-    const openTime = openHour * 60; // Convert to minutes
-    const closeTime = closeHour * 60; // Convert to minutes
-
-    const statusContainer = document.getElementById("shop-status");
-    
-    if (currentTime >= openTime && currentTime <= closeTime) {
-        statusContainer.innerHTML = "Opened";
-        statusContainer.className = "status-container status-open";
-    } else {
-        statusContainer.innerHTML = "Toko Sedang Tutup...Silahkan Datang Kembali Besok:) 🔴";
-        statusContainer.className = "status-container status-closed";
-    }
-}
-
-// Update status setiap detik
-setInterval(updateShopStatus, 1000);
-updateShopStatus(); // Panggil fungsi pertama kali
 </script>
 
-    <?php include 'includes/footer.php'; ?>
-    
+<footer>
+        <div class="footer">
+            <p>&copy; 2025 FLOAT SMOOTHIES MEDAN. All rights reserved.</p>
+        </div>
+    </footer>
+</body>
+</html>
 </body>
 </html>
